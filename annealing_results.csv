@@ -1,0 +1,13 @@
+round,best_cfg,best_cost
+0,"{'num_fu_FP_SIMD_ALU': 2, 'num_fu_intALU': 2, 'num_fu_write': 1, 'sq_entries': 72, 'l1d_size': 64}",0.100269
+1,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 4, 'sq_entries': 72, 'l1d_size': 128}",0.099786
+2,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+3,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+4,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+5,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+6,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+7,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+8,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+9,"{'num_fu_FP_SIMD_ALU': 8, 'num_fu_intALU': 6, 'num_fu_write': 5, 'sq_entries': 72, 'l1d_size': 128}",0.09978
+10,"{'num_fu_FP_SIMD_ALU': 6, 'num_fu_intALU': 6, 'num_fu_write': 2, 'sq_entries': 144, 'l1d_size': 128}",0.099505
+11,"{'num_fu_FP_SIMD_ALU': 6, 'num_fu_intALU': 6, 'num_fu_write': 2, 'sq_entries': 144, 'l1d_size': 128}",0.099505
