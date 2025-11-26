@@ -1,9 +1,12 @@
-%%writefile dot_product.cu
+% % writefile dot_product.cu
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <ctime>
 
-#define TPB 1024   // Threads per block
+#define TPB 1024 // Threads per block
 
+    unsigned t0,
+    t1;
 
 /**
  * @brief Kernel que reduce (suma) un vector en segmentos: cada bloque suma un subconjunto y escribe un parcial.
@@ -16,7 +19,8 @@
  *          elementos contienen las sumas parciales por bloque.
  * @param length Longitud válida de v en esta llamada (número de elementos que contienen datos útiles).
  */
-__global__ void reduce_stage(float *v, int length) {
+__global__ void reduce_stage(float *v, int length)
+{
     __shared__ float buf[TPB];
 
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -30,8 +34,10 @@ __global__ void reduce_stage(float *v, int length) {
     __syncthreads();
 
     // Reducción
-    for (int step = blockDim.x / 2; step > 0; step >>= 1) { // que tantos hilos hay en ese bloque?
-        if (threadIdx.x < step) {                           // pues los vamos a sumar con pasos de la mitad de los hilos en cada pasada
+    for (int step = blockDim.x / 2; step > 0; step >>= 1)
+    { // que tantos hilos hay en ese bloque?
+        if (threadIdx.x < step)
+        { // pues los vamos a sumar con pasos de la mitad de los hilos en cada pasada
             buf[threadIdx.x] += buf[threadIdx.x + step];
         }
         __syncthreads();
@@ -53,7 +59,8 @@ __global__ void reduce_stage(float *v, int length) {
  * @param b Puntero a vector b (device).
  * @param out Vector de salida (device) de longitud >= gridDim.x; out[blockIdx.x] = suma parcial del bloque.
  */
-__global__ void dot_kernel(int n, const float *a, const float *b, float *out) {
+__global__ void dot_kernel(int n, const float *a, const float *b, float *out)
+{
     __shared__ float local[TPB];
 
     local[threadIdx.x] = 0.0f;
@@ -62,14 +69,17 @@ __global__ void dot_kernel(int n, const float *a, const float *b, float *out) {
     int start = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
 
-    for (int i = start; i < n; i += stride) {
+    for (int i = start; i < n; i += stride)
+    {
         local[threadIdx.x] += a[i] * b[i];
     }
 
     __syncthreads();
 
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) {
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s)
+        {
             local[threadIdx.x] += local[threadIdx.x + s];
         }
         __syncthreads();
@@ -79,15 +89,12 @@ __global__ void dot_kernel(int n, const float *a, const float *b, float *out) {
         out[blockIdx.x] = local[0];
 }
 
-int main() {
+void do_dot(int total_blocks, int block_size)
+{
+    t0 = clock();
 
-    const int N = 1 << 28;  // 268M floats
-    const int block_size = TPB;
+    const int N = 1 << 28; // 268M floats
 
-    int sms;
-    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
-
-    int total_blocks = sms * 32;
     int remaining_blocks;
 
     float *h_x = new float[N];
@@ -97,7 +104,8 @@ int main() {
     float result = 0.0f;
 
     // Inicializar
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         h_x[i] = 3.0f;
         h_y[i] = 2.0f;
     }
@@ -120,7 +128,8 @@ int main() {
     reduce_stage<<<remaining_blocks, block_size>>>(d_partial, total_blocks);
     cudaDeviceSynchronize();
 
-    while (remaining_blocks > 1) {
+    while (remaining_blocks > 1)
+    {
         int prev = remaining_blocks;
         remaining_blocks = (remaining_blocks + block_size - 1) / block_size;
 
@@ -138,5 +147,36 @@ int main() {
     delete[] h_x;
     delete[] h_y;
 
-    return 0;
+    t1 = clock();
+
+    double time = (double(t1 - t0) / CLOCKS_PER_SEC);
+
+    printf("Excution time: %2f\n", time);
+}
+
+int main()
+{
+
+    const int block_size = TPB;
+    int sms;
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
+
+    
+    for (int tb = 1 << 6; tb < 1 << 9; tb <<= 1)
+    {
+        printf("Numero de bloques: %d", total_blocks);
+        do_dot(tb, block_size)
+    }
+
+    printf("\n\n\n");
+
+    int total_blocks = sms * 32;
+
+    for (int bs = 1 << 6; bs < 1 << 9; bs <<= 1)
+    {
+        printf("Numero de bloques: %d", total_blocks);
+        do_dot(total_blocks, bs)
+    }
+
+    return 0
 }
