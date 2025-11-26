@@ -1,4 +1,4 @@
-%%writefile kmeans_gpu.cu
+%%writefile kmeans_basic.cu
 
 #include <stdio.h>
 #include <stdlib.h>
