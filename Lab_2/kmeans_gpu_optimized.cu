@@ -164,11 +164,15 @@ int load_csv(const char *filename, float **out_points) {
     return count;
 }
 
-void initialize_centroids_simple(float *centroids, int K) {
+void initialize_random_centroids(float *points, int N, float *centroids, int K) {
+    // Semilla para números aleatorios
     srand(time(NULL));
+    
     for (int c = 0; c < K; c++) {
-        centroids[2 * c] = (rand() % 200 - 100) / 10.0f; // -10 to 10
-        centroids[2 * c + 1] = (rand() % 200 - 100) / 10.0f;
+        // Escoger un punto aleatorio como centroide inicial
+        int random_idx = rand() % N;
+        centroids[2 * c] = points[2 * random_idx];
+        centroids[2 * c + 1] = points[2 * random_idx + 1];
     }
 }
 
@@ -230,7 +234,7 @@ int main(int argc, char **argv) {
     cudaMemcpy(d_points, h_points, N * 2 * sizeof(float), cudaMemcpyHostToDevice);
 
     // Inicializar centroides
-    initialize_centroids_simple(h_centroids, K);
+    initialize_random_centroids(h_points, N, h_centroids, K);
 
     printf("Initial centroids:\n");
     for (int c = 0; c < K; c++) {
