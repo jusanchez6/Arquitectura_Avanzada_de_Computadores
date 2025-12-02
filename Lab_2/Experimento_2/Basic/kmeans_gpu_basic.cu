@@ -10,16 +10,39 @@
 #define MAX_CLUSTERS 20
 #define THREADS_PER_BLOCK 256
 
-// =========================================
-// KERNELS
-// =========================================
 
+/**
+ * @brief Calcula la distancia euclidiana al cuadrado entre dos puntos 2D.
+ *
+ * Esta función devuelve (px - cx)^2 + (py - cy)^2, evitando la operación de
+ * raíz cuadrada, lo cual es útil para comparaciones de distancias.
+ *
+ * @param px Coordenada X del punto.
+ * @param py Coordenada Y del punto.
+ * @param cx Coordenada X del centro.
+ * @param cy Coordenada Y del centro.
+ * @return float Distancia al cuadrado entre (px, py) y (cx, cy).
+ */
 __device__ float dist2(float px, float py, float cx, float cy) {
     float dx = px - cx;
     float dy = py - cy;
     return dx * dx + dy * dy;
 }
 
+/**
+ * @brief Asigna cada punto al clúster más cercano.
+ *
+ * Kernel que calcula para cada punto 2D el centroide más cercano usando
+ * distancia euclidiana al cuadrado. Cada hilo procesa un punto y escribe
+ * la etiqueta correspondiente.
+ *
+ * @param points Arreglo de puntos 2D en formato [x0, y0, x1, y1, ...].
+ * @param centroids Arreglo de centroides 2D en formato [cx0, cy0, cx1, cy1, ...].
+ * @param labels Arreglo de salida donde se guarda para cada punto el índice del clúster asignado.
+ * @param N Número total de puntos.
+ * @param K Número total de centroides.
+ * @return void No retorna valor; escribe los resultados en `labels`.
+ */
 __global__ void assign_clusters_basic(
     const float *points,
     const float *centroids,
@@ -48,6 +71,22 @@ __global__ void assign_clusters_basic(
     labels[idx] = best_c;
 }
 
+/**
+ * @brief Acumula las sumas parciales para recalcular los centroides.
+ *
+ * Kernel que, para cada punto, añade sus coordenadas a la suma acumulada
+ * de su clúster correspondiente y aumenta el contador de puntos.  
+ * Estos valores luego se usan para calcular los nuevos centroides.
+ *
+ * @param points Arreglo de puntos 2D en formato [x0, y0, x1, y1, ...].
+ * @param centroids (No usado en esta versión básica, pero se mantiene por consistencia).
+ * @param labels Etiquetas que indican el clúster asignado a cada punto.
+ * @param sums Arreglo donde se acumulan las sumas de coordenadas por clúster.
+ * @param counts Arreglo donde se cuenta cuántos puntos pertenecen a cada clúster.
+ * @param N Número total de puntos.
+ * @param K Número total de clústeres.
+ * @return void No retorna valor; actualiza `sums` y `counts`.
+ */
 __global__ void update_centroids_basic(
     const float *points,
     float *centroids,
@@ -69,10 +108,17 @@ __global__ void update_centroids_basic(
     atomicAdd(&counts[c], 1);
 }
 
-// =========================================
-// LOAD CSV
-// =========================================
-
+/**
+ * @brief Carga puntos 2D desde un archivo CSV.
+ *
+ * Lee un archivo CSV con formato "x,y" por línea y almacena los valores
+ * en un arreglo dinámico de floats organizado como [x0, y0, x1, y1, ...].
+ * El arreglo es asignado internamente y devuelto mediante `out_points`.
+ *
+ * @param filename Nombre del archivo CSV a leer.
+ * @param out_points Puntero de salida donde se almacenará la dirección del arreglo dinámico.
+ * @return int Número de puntos cargados, o -1 en caso de error.
+ */
 int load_csv(const char *filename, float **out_points) {
     FILE *f = fopen(filename, "r");
     if (!f) {
@@ -102,8 +148,17 @@ int load_csv(const char *filename, float **out_points) {
     return count;
 }
 
-
-
+/**
+ * @brief Imprime los centroides finales y el tiempo total de ejecución.
+ *
+ * Muestra por consola las coordenadas de cada centroide calculado y el
+ * tiempo total que tomó el algoritmo en milisegundos.
+ *
+ * @param centroids Arreglo de centroides en formato [cx0, cy0, cx1, cy1, ...].
+ * @param K Número de centroides.
+ * @param execution_time Tiempo total de ejecución del algoritmo (en ms).
+ * @return void No retorna valor.
+ */
 void print_results(float *centroids, int K, float execution_time) {
     printf("\nFinal centroids:\n");
     for (int c = 0; c < K; c++) {
@@ -112,6 +167,18 @@ void print_results(float *centroids, int K, float execution_time) {
     printf("Execution time: %.2f ms\n", execution_time);
 }
 
+/**
+ * @brief Inicializa los centroides escogiendo puntos aleatorios del conjunto.
+ *
+ * Selecciona aleatoriamente K puntos del arreglo de entrada y usa sus
+ * coordenadas como los centroides iniciales para el algoritmo k-means.
+ *
+ * @param points Arreglo de puntos 2D en formato [x0, y0, x1, y1, ...].
+ * @param N Número total de puntos disponibles.
+ * @param centroids Arreglo donde se almacenarán los centroides iniciales.
+ * @param K Número de centroides a inicializar.
+ * @return void No retorna valor.
+ */
 void initialize_random_centroids(float *points, int N, float *centroids, int K) {
     srand(time(NULL));
     for (int c = 0; c < K; c++) {
@@ -121,7 +188,24 @@ void initialize_random_centroids(float *points, int N, float *centroids, int K) 
     }
 }
 
-
+/**
+ * @brief Ejecuta la versión básica del algoritmo k-means en GPU.
+ *
+ * Implementa k-means usando CUDA: asignación de clústeres, acumulación de
+ * centroides, actualización de posiciones y verificación de convergencia.
+ * Además, guarda en archivos CSV las etiquetas y centroides en cada iteración
+ * para facilitar la visualización del proceso.
+ *
+ * @param d_points Puntero en GPU a los puntos 2D ([x0,y0,x1,y1,...]).
+ * @param d_centroids Puntero en GPU a los centroides actuales.
+ * @param N Número total de puntos.
+ * @param K Número de clústeres.
+ * @param max_iters Iteraciones máximas permitidas.
+ * @param epsilon Umbral de convergencia basado en el movimiento total de centroides.
+ * @param blocks Número de bloques para los kernels.
+ * @param threads Número de hilos por bloque.
+ * @return void No retorna valor; actualiza los centroides directamente en GPU.
+ */
 void kmeans_gpu_basic(
     float *d_points,
     float *d_centroids,
@@ -219,10 +303,23 @@ void kmeans_gpu_basic(
     cudaFree(d_counts);
 }
 
-// =========================================
-// MAIN
-// =========================================
-
+/**
+ * @brief Punto de entrada del programa para ejecutar k-means en GPU.
+ *
+ * Carga un archivo CSV con puntos 2D, inicializa los centroides,
+ * transfiere los datos a la GPU y ejecuta la versión básica del
+ * algoritmo k-means. Mide el tiempo total de ejecución y muestra
+ * los centroides finales.  
+ *
+ * Parámetros de ejecución (opcionales):
+ * - K: número de clústeres (por defecto 3)
+ * - blocks: cantidad de bloques CUDA (por defecto 64)
+ * - threads: hilos por bloque (por defecto 256)
+ *
+ * @param argc Número de argumentos de línea de comandos.
+ * @param argv Lista de argumentos: data.csv [K] [blocks] [threads].
+ * @return int 0 si la ejecución fue exitosa, o 1 si ocurrió un error.
+ */
 int main(int argc, char **argv) {
 
     if (argc < 2) {

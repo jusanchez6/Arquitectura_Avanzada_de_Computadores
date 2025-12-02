@@ -13,18 +13,38 @@
 #define MAX_CLUSTERS 20
 #define THREADS_PER_BLOCK 256
 
-// ==========================================
-// GPU distance
-// ==========================================
+/**
+ * @brief Calcula la distancia euclidiana al cuadrado entre dos puntos 2D.
+ *
+ * Esta función devuelve (px - cx)^2 + (py - cy)^2, evitando la operación de
+ * raíz cuadrada, lo cual es útil para comparaciones de distancias.
+ *
+ * @param px Coordenada X del punto.
+ * @param py Coordenada Y del punto.
+ * @param cx Coordenada X del centro.
+ * @param cy Coordenada Y del centro.
+ * @return float Distancia al cuadrado entre (px, py) y (cx, cy).
+ */
 __device__ float dist2(float px, float py, float cx, float cy) {
     float dx = px - cx;
     float dy = py - cy;
     return dx*dx + dy*dy;
 }
 
-// ==========================================
-// ASSIGN CLUSTERS (optimized)
-// ==========================================
+/**
+ * @brief Asigna cada punto al clúster más cercano usando memoria compartida.
+ *
+ * Versión optimizada del kernel de asignación de clústeres. Copia los
+ * centroides a memoria compartida para reducir accesos repetidos a memoria
+ * global, mejorando el rendimiento cuando K es pequeño o moderado.
+ *
+ * @param points Arreglo de puntos 2D en GPU ([x0,y0,x1,y1,...]).
+ * @param centroids Arreglo de centroides en GPU.
+ * @param labels Arreglo donde se escriben las etiquetas asignadas a cada punto.
+ * @param N Número total de puntos.
+ * @param K Número de centroides.
+ * @return void No retorna valor; actualiza `labels` en GPU.
+ */
 __global__ void assign_clusters_advanced(
     const float *points,
     const float *centroids,
@@ -61,9 +81,21 @@ __global__ void assign_clusters_advanced(
     labels[idx] = best_c;
 }
 
-// ==========================================
-// UPDATE CENTROIDS (optimized)
-// ==========================================
+/**
+ * @brief Actualiza los centroides usando acumulación parcial en memoria compartida.
+ *
+ * Kernel optimizado que acumula las sumas y conteos de puntos por clúster
+ * dentro de memoria compartida para reducir contención y accesos a memoria
+ * global. Cada bloque computa sumas parciales y al final actualiza los
+ * centroides correspondientes.
+ *
+ * @param points Arreglo de puntos 2D en GPU ([x0,y0,x1,y1,...]).
+ * @param centroids Arreglo de centroides que será actualizado en GPU.
+ * @param labels Etiqueta asignada a cada punto.
+ * @param N Número total de puntos.
+ * @param K Número de clústeres.
+ * @return void No retorna valor; actualiza `centroids` en GPU.
+ */
 __global__ void update_centroids_advanced(
     const float *points,
     float *centroids,
@@ -100,45 +132,69 @@ __global__ void update_centroids_advanced(
     }
 }
 
-// ==========================================
-// CREATE OUTPUT DIRECTORY
-// ==========================================
-void ensure_output_dir() {
-    struct stat st = {0};
-    if (stat("output_optimized", &st) == -1) {
-        mkdir("output_optimized", 0777);
-    }
-}
-
-// ==========================================
-// SAVE LABELS
-// ==========================================
-void save_labels(const int *h_labels, int N, int iter) {
+/**
+ * @brief Guarda las etiquetas asignadas a cada punto en un archivo CSV.
+ *
+ * Genera un archivo llamado "labels_iter_<iter>.csv" y escribe una
+ * etiqueta por línea, correspondiente al arreglo h_labels.
+ *
+ * @param h_labels  Arreglo de etiquetas en el host.
+ * @param N         Número de puntos.
+ * @param iter      Número de iteración (usado en el nombre del archivo).
+ */
+void save_labels_cpu(const int *h_labels, int N, int iter) {
     char filename[128];
     sprintf(filename, "labels_iter_%d.csv", iter);
-
     FILE *f = fopen(filename, "w");
+    if (!f) { printf("Error saving %s\n", filename); return; }
     for (int i = 0; i < N; i++)
         fprintf(f, "%d\n", h_labels[i]);
     fclose(f);
 }
 
-// ==========================================
-// SAVE CENTROIDS
-// ==========================================
-void save_centroids(const float *h_centroids, int K, int iter) {
+/**
+ * @brief Guarda los centroides actuales en un archivo CSV.
+ *
+ * Crea un archivo con nombre "centroids_iter_<iter>.csv" y escribe
+ * las coordenadas (x, y) de cada uno de los K centroides.
+ *
+ * @param h_centroids  Arreglo con los centroides en el host (tamaño 2*K).
+ * @param K            Número de centroides.
+ * @param iter         Iteración actual (para el nombre del archivo).
+ */
+void save_centroids_cpu(const float *h_centroids, int K, int iter) {
     char filename[128];
     sprintf(filename, "centroids_iter_%d.csv", iter);
-
     FILE *f = fopen(filename, "w");
+    if (!f) { printf("Error saving %s\n", filename); return; }
     for (int c = 0; c < K; c++)
         fprintf(f, "%f,%f\n", h_centroids[2*c], h_centroids[2*c+1]);
     fclose(f);
 }
 
-// ==========================================
-// K-MEANS OPTIMIZED (with saving)
-// ==========================================
+/**
+ * @brief Ejecuta el algoritmo K-means optimizado en GPU (versión avanzada).
+ *
+ * Esta función implementa el flujo completo del algoritmo K-means utilizando dos kernels
+ * optimizados:
+ *  - assign_clusters_advanced(): asigna cada punto a su centroide más cercano usando
+ *    memoria compartida para los centroides.
+ *  - update_centroids_advanced(): acumula sumas por bloque usando memoria compartida
+ *    antes de hacer las actualizaciones finales.
+ *
+ * Adicionalmente:
+ *  - Guarda en cada iteración los labels y centroides en archivos CSV.
+ *  - Verifica convergencia comparando los centroides de la iteración actual y la previa.
+ *
+ * @param d_points     Puntero en GPU a los puntos (tamaño 2*N).
+ * @param d_centroids  Puntero en GPU a los centroides (tamaño 2*K). Se actualiza en cada iteración.
+ * @param N            Número total de puntos.
+ * @param K            Número de clusters.
+ * @param max_iters     Número máximo de iteraciones a ejecutar.
+ * @param epsilon      Tolerancia para criterio de convergencia (desplazamiento máximo permitido).
+ * @param blocks       Número de bloques por kernel.
+ * @param threads      Hilos por bloque.
+ */
 void kmeans_advanced(
     float *d_points,
     float *d_centroids,
@@ -155,33 +211,66 @@ void kmeans_advanced(
     int *h_labels = (int*)malloc(N * sizeof(int));
     float *h_centroids = (float*)malloc(K * 2 * sizeof(float));
 
+    // store previous centroids 
+    float *h_old_centroids = (float*)malloc(K * 2 * sizeof(float));
+
     size_t shared_mem = (K * 2 * sizeof(float)) + (K * sizeof(int));
 
     for (int it = 0; it < max_iters; it++) {
 
+        // Copy previous centroids
+        cudaMemcpy(h_old_centroids, d_centroids, K * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+
         assign_clusters_advanced<<<blocks, threads>>>(d_points, d_centroids, d_labels, N, K);
         cudaDeviceSynchronize();
 
+        // save the labesl before the convergence check
         cudaMemcpy(h_labels, d_labels, N * sizeof(int), cudaMemcpyDeviceToHost);
-        save_labels(h_labels, N, it);
+        save_labels_cpu(h_labels, N, it);
 
-        update_centroids_advanced<<<blocks, threads, shared_mem>>>(d_points, d_centroids, d_labels, N, K);
+        update_centroids_advanced<<<blocks, threads, shared_mem>>>(
+            d_points, d_centroids, d_labels, N, K);
         cudaDeviceSynchronize();
 
+        // Save the centroids before the convergence check
         cudaMemcpy(h_centroids, d_centroids, K * 2 * sizeof(float), cudaMemcpyDeviceToHost);
-        save_centroids(h_centroids, K, it);
+        save_centroids_cpu(h_centroids, K, it);
 
         printf("Iteration %d saved.\n", it);
+
+        // convergence check
+        float max_shift = 0.0f;
+        for (int c = 0; c < K; c++) {
+            float dx = h_centroids[2*c]     - h_old_centroids[2*c];
+            float dy = h_centroids[2*c + 1] - h_old_centroids[2*c + 1];
+            float shift = sqrtf(dx*dx + dy*dy);
+            if (shift > max_shift) max_shift = shift;
+        }
+
+        if (max_shift < epsilon) {
+            printf("Converged at iteration %d (max shift = %.6f)\n", it, max_shift);
+            break;
+        }
     }
 
+    // let be free the memory
     free(h_labels);
     free(h_centroids);
+    free(h_old_centroids);
     cudaFree(d_labels);
 }
 
-// ==========================================
-// CSV LOADING + MAIN
-// ==========================================
+/**
+ * @brief Carga puntos 2D desde un archivo CSV.
+ *
+ * Lee un archivo CSV con formato "x,y" por línea y almacena los valores
+ * en un arreglo dinámico de floats organizado como [x0, y0, x1, y1, ...].
+ * El arreglo es asignado internamente y devuelto mediante `out_points`.
+ *
+ * @param filename Nombre del archivo CSV a leer.
+ * @param out_points Puntero de salida donde se almacenará la dirección del arreglo dinámico.
+ * @return int Número de puntos cargados, o -1 en caso de error.
+ */
 int load_csv(const char *filename, float **out_points) {
     FILE *f = fopen(filename, "r");
     if (!f) return -1;
@@ -200,14 +289,38 @@ int load_csv(const char *filename, float **out_points) {
     return count;
 }
 
-void initialize_centroids_simple(float *centroids, int K) {
+/**
+ * @brief Inicializa los centroides escogiendo puntos aleatorios del conjunto.
+ *
+ * Selecciona aleatoriamente K puntos del arreglo de entrada y usa sus
+ * coordenadas como los centroides iniciales para el algoritmo k-means.
+ *
+ * @param points Arreglo de puntos 2D en formato [x0, y0, x1, y1, ...].
+ * @param N Número total de puntos disponibles.
+ * @param centroids Arreglo donde se almacenarán los centroides iniciales.
+ * @param K Número de centroides a inicializar.
+ * @return void No retorna valor.
+ */
+void initialize_random_centroids(float *points, int N, float *centroids, int K) {
     srand(time(NULL));
     for (int c = 0; c < K; c++) {
-        centroids[2*c]   = (rand()%200 - 100) / 10.0f;
-        centroids[2*c+1] = (rand()%200 - 100) / 10.0f;
+        int idx = rand() % N;
+        centroids[2 * c] = points[2 * idx];
+        centroids[2 * c + 1] = points[2 * idx + 1];
     }
 }
 
+/**
+ * @brief Imprime los centroides finales y el tiempo total de ejecución.
+ *
+ * Muestra por consola las coordenadas de cada centroide calculado y el
+ * tiempo total que tomó el algoritmo en milisegundos.
+ *
+ * @param centroids Arreglo de centroides en formato [cx0, cy0, cx1, cy1, ...].
+ * @param K Número de centroides.
+ * @param execution_time Tiempo total de ejecución del algoritmo (en ms).
+ * @return void No retorna valor.
+ */
 void print_results(float *centroids, int K, float ms) {
     printf("\nFinal centroids:\n");
     for (int c = 0; c < K; c++)
@@ -215,6 +328,44 @@ void print_results(float *centroids, int K, float ms) {
     printf("Execution time: %.2f ms\n", ms);
 }
 
+
+/**
+ * @brief Punto de entrada principal para ejecutar K-means GPU avanzado.
+ *
+ * Esta función carga un dataset desde un archivo CSV, inicializa los centroides,
+ * copia datos a la GPU y ejecuta la versión optimizada del algoritmo K-means.
+ * Al finalizar, mide el tiempo total de ejecución, recupera los centroides finales
+ * y muestra los resultados.
+ *
+ * Flujo general:
+ * 1. Leer argumentos de línea de comandos para configurar:
+ *      - Archivo CSV de entrada.
+ *      - Número de clusters K.
+ *      - Configuración GPU: blocks, threads.
+ * 
+ * 2. Cargar dataset en memoria host con load_csv().
+ * 
+ * 3. Inicializar centroides aleatorios usando puntos del dataset.
+ * 
+ * 4. Reservar memoria en GPU y copiar datos.
+ * 
+ * 5. Medir tiempo de ejecución usando eventos CUDA.
+ * 
+ * 6. Ejecutar K-means avanzado con kmeans_advanced()`
+ * 
+ * 7. Copiar resultados finales al host.
+ * 
+ * 8. Imprimir resultados y liberar recursos.
+ *
+ * @param argc Conteo de argumentos.
+ * @param argv Vector de argumentos:  
+ *   - argv[1]: archivo CSV.  
+ *   - argv[2]: (opcional) número de clusters K.  
+ *   - argv[3]: (opcional) número de bloques.  
+ *   - argv[4]: (opcional) hilos por bloque.  
+ *
+ * @return `0` si se ejecuta correctamente, `1` ante error.
+ */
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("Usage: %s data.csv [K] [blocks] [threads]\n", argv[0]);
@@ -224,14 +375,15 @@ int main(int argc, char **argv) {
     int K = (argc > 2) ? atoi(argv[2]) : 3;
     int blocks = (argc > 3) ? atoi(argv[3]) : 64;
     int threads = (argc > 4) ? atoi(argv[4]) : 256;
-    int max_iters = 10;
+    int max_iters = 10000;
 
     float *h_points = NULL;
     int N = load_csv(argv[1], &h_points);
     if (N <= 0) return 1;
 
     float *h_centroids = (float*)malloc(K * 2 * sizeof(float));
-    initialize_centroids_simple(h_centroids, K);
+    initialize_random_centroids(h_points, N, h_centroids, K);
+
 
     float *d_points, *d_centroids;
     cudaMalloc(&d_points, N * 2 * sizeof(float));
