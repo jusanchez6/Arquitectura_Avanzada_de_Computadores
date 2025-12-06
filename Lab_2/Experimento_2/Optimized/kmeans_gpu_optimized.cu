@@ -53,10 +53,9 @@ __global__ void assign_clusters_advanced(
 {
     __shared__ float shared_centroids[MAX_CLUSTERS * 2];
 
-    // Load centroids into shared memory
-    for (int i = threadIdx.x; i < K * 2; i += blockDim.x) {
+    // Cargar centroides en shared
+    for (int i = threadIdx.x; i < K * 2; i += blockDim.x)
         shared_centroids[i] = centroids[i];
-    }
     __syncthreads();
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,6 +79,87 @@ __global__ void assign_clusters_advanced(
 
     labels[idx] = best_c;
 }
+
+__global__ void accumulate_partials(
+    const float *points,
+    const int *labels,
+    float *d_partial_sums,   // blocks * (K*2)
+    int   *d_partial_counts, // blocks * K
+    int N, int K)
+{
+    extern __shared__ float shared_mem[]; // tamaño: K*2*sizeof(float) + K*sizeof(int)
+    float *sums = shared_mem;
+    int *counts = (int*)&sums[K * 2];
+
+    // Inicializar sums y counts en shared
+    for (int i = threadIdx.x; i < K * 2; i += blockDim.x)
+        sums[i] = 0.0f;
+    for (int i = threadIdx.x; i < K; i += blockDim.x)
+        counts[i] = 0;
+    __syncthreads();
+
+    // Procesar los puntos asignados a este bloque (stride grid)
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int idx = global_tid; idx < N; idx += stride) {
+        int c = labels[idx];
+        if (c >= 0 && c < K) {
+            float x = points[2 * idx];
+            float y = points[2 * idx + 1];
+            // atomics en shared son más eficientes que atomics globales
+            atomicAdd(&sums[2 * c], x);
+            atomicAdd(&sums[2 * c + 1], y);
+            atomicAdd(&counts[c], 1);
+        }
+    }
+    __syncthreads();
+
+    // Escribir parciales del bloque a memoria global
+    int block_offset_f = blockIdx.x * (K * 2);
+    int block_offset_i = blockIdx.x * K;
+
+    // Escribir sums (float)
+    for (int i = threadIdx.x; i < K * 2; i += blockDim.x) {
+        d_partial_sums[block_offset_f + i] = sums[i];
+    }
+    // Escribir counts (int)
+    for (int i = threadIdx.x; i < K; i += blockDim.x) {
+        d_partial_counts[block_offset_i + i] = counts[i];
+    }
+}
+
+__global__ void finalize_centroids(
+    const float *d_partial_sums,
+    const int   *d_partial_counts,
+    float *d_centroids,
+    int blocks,
+    int K)
+{
+    // Cada thread se encarga de uno o varios clusters
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    for (int c = tid; c < K; c += stride) {
+        double sumx = 0.0;
+        double sumy = 0.0;
+        int total = 0;
+        // Sumar sobre todos los bloques
+        int offset_f = 2 * c;
+        for (int b = 0; b < blocks; b++) {
+            int base_f = b * (K * 2);
+            int base_i = b * K;
+            sumx += (double)d_partial_sums[base_f + offset_f];
+            sumy += (double)d_partial_sums[base_f + offset_f + 1];
+            total += d_partial_counts[base_i + c];
+        }
+        if (total > 0) {
+            d_centroids[2 * c]     = (float)(sumx / total);
+            d_centroids[2 * c + 1] = (float)(sumy / total);
+        }
+        // Si total == 0, dejamos el centroide como estaba antes
+    }
+}
+
 
 /**
  * @brief Actualiza los centroides usando acumulación parcial en memoria compartida.
@@ -152,25 +232,6 @@ void save_labels_cpu(const int *h_labels, int N, int iter) {
     fclose(f);
 }
 
-/**
- * @brief Guarda los centroides actuales en un archivo CSV.
- *
- * Crea un archivo con nombre "centroids_iter_<iter>.csv" y escribe
- * las coordenadas (x, y) de cada uno de los K centroides.
- *
- * @param h_centroids  Arreglo con los centroides en el host (tamaño 2*K).
- * @param K            Número de centroides.
- * @param iter         Iteración actual (para el nombre del archivo).
- */
-void save_centroids_cpu(const float *h_centroids, int K, int iter) {
-    char filename[128];
-    sprintf(filename, "centroids_iter_%d.csv", iter);
-    FILE *f = fopen(filename, "w");
-    if (!f) { printf("Error saving %s\n", filename); return; }
-    for (int c = 0; c < K; c++)
-        fprintf(f, "%f,%f\n", h_centroids[2*c], h_centroids[2*c+1]);
-    fclose(f);
-}
 
 /**
  * @brief Ejecuta el algoritmo K-means optimizado en GPU (versión avanzada).
@@ -203,61 +264,86 @@ void kmeans_advanced(
     int max_iters,
     float epsilon,
     int blocks,
-    int threads)
+    int threads,
+    int *h_iterations)
 {
-    int *d_labels;
+    int *d_labels = nullptr;
     cudaMalloc(&d_labels, N * sizeof(int));
+
+    // arrays para parciales por bloque
+    float *d_partial_sums = nullptr;   // blocks * (K*2)
+    int   *d_partial_counts = nullptr; // blocks * K
+
+    size_t partial_sums_bytes = (size_t)blocks * (size_t)(K * 2) * sizeof(float);
+    size_t partial_counts_bytes = (size_t)blocks * (size_t)K * sizeof(int);
+
+    cudaMalloc(&d_partial_sums, partial_sums_bytes);
+    cudaMalloc(&d_partial_counts, partial_counts_bytes);
 
     int *h_labels = (int*)malloc(N * sizeof(int));
     float *h_centroids = (float*)malloc(K * 2 * sizeof(float));
-
-    // store previous centroids 
     float *h_old_centroids = (float*)malloc(K * 2 * sizeof(float));
 
+    // shared mem size para accumulate_partials
     size_t shared_mem = (K * 2 * sizeof(float)) + (K * sizeof(int));
 
     for (int it = 0; it < max_iters; it++) {
 
-        // Copy previous centroids
+        // guardar centroides previos en host
         cudaMemcpy(h_old_centroids, d_centroids, K * 2 * sizeof(float), cudaMemcpyDeviceToHost);
 
+        // 1) asignar clusters
         assign_clusters_advanced<<<blocks, threads>>>(d_points, d_centroids, d_labels, N, K);
         cudaDeviceSynchronize();
 
-        // save the labesl before the convergence check
+        // opcional: copiar labels al host si quieres (está comentado en tu versión original)
         cudaMemcpy(h_labels, d_labels, N * sizeof(int), cudaMemcpyDeviceToHost);
-        save_labels_cpu(h_labels, N, it);
+        // save_labels_cpu(h_labels, N, it);
 
-        update_centroids_advanced<<<blocks, threads, shared_mem>>>(
-            d_points, d_centroids, d_labels, N, K);
+        // 2) acumular parciales por bloque (cada bloque escribe sus parciales)
+        // inicializar parciales a 0 (no estrictamente necesario si cada bloque sobrescribe todas sus posiciones,
+        // pero por seguridad lo inicializamos)
+        cudaMemset(d_partial_sums, 0, partial_sums_bytes);
+        cudaMemset(d_partial_counts, 0, partial_counts_bytes);
+
+        accumulate_partials<<<blocks, threads, shared_mem>>>(
+            d_points, d_labels, d_partial_sums, d_partial_counts, N, K);
         cudaDeviceSynchronize();
 
-        // Save the centroids before the convergence check
+        // 3) reducir parciales globales y calcular centroides (kernel de 1 bloque)
+        int threads_finalize = (threads > 128) ? 128 : threads; // suficiente, K <= MAX_CLUSTERS
+        if (threads_finalize < 1) threads_finalize = 1;
+        finalize_centroids<<<1, threads_finalize>>>(
+            d_partial_sums, d_partial_counts, d_centroids, blocks, K);
+        cudaDeviceSynchronize();
+
+        // copiar centroides al host para criterio de convergencia
         cudaMemcpy(h_centroids, d_centroids, K * 2 * sizeof(float), cudaMemcpyDeviceToHost);
-        save_centroids_cpu(h_centroids, K, it);
 
-        printf("Iteration %d saved.\n", it);
-
-        // convergence check
-        float max_shift = 0.0f;
+        // convergence check (distancia euclidiana entre old y new)
+        float movement = 0.0f;
         for (int c = 0; c < K; c++) {
             float dx = h_centroids[2*c]     - h_old_centroids[2*c];
             float dy = h_centroids[2*c + 1] - h_old_centroids[2*c + 1];
-            float shift = sqrtf(dx*dx + dy*dy);
-            if (shift > max_shift) max_shift = shift;
+            movement += dx*dx + dy*dy;
         }
 
-        if (max_shift < epsilon) {
-            printf("Converged at iteration %d (max shift = %.6f)\n", it, max_shift);
+        if (movement < epsilon) {
+            printf("Convergencia en iteración %d\n", it);
+            *h_iterations = it;
             break;
         }
+
+
     }
 
-    // let be free the memory
     free(h_labels);
     free(h_centroids);
     free(h_old_centroids);
+
     cudaFree(d_labels);
+    cudaFree(d_partial_sums);
+    cudaFree(d_partial_counts);
 }
 
 /**
@@ -302,13 +388,16 @@ int load_csv(const char *filename, float **out_points) {
  * @return void No retorna valor.
  */
 void initialize_random_centroids(float *points, int N, float *centroids, int K) {
-    srand(time(NULL));
+    srand(12345);
     for (int c = 0; c < K; c++) {
         int idx = rand() % N;
         centroids[2 * c] = points[2 * idx];
         centroids[2 * c + 1] = points[2 * idx + 1];
+
+        printf("Centroide: %0.2f , %0.2f \n", points[2 * idx],  points[2 * idx + 1]);
     }
 }
+
 
 /**
  * @brief Imprime los centroides finales y el tiempo total de ejecución.
